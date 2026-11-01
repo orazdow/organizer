@@ -1,7 +1,7 @@
-import { createSignal, Show, onCleanup } from 'solid-js';
+import { createSignal, For, Show, onCleanup } from 'solid-js';
 import { createGitHubClient } from './api.js';
 import { normalizeCredentials } from './credentials.js';
-import { parseRepository, repositoryName } from './repository-state.js';
+import { canForgetRepository, parseRepository, repositoryKey, repositoryName } from './repository-state.js';
 
 export default function RepositorySelector(props) {
   const [open, setOpen] = createSignal(false);
@@ -13,8 +13,11 @@ export default function RepositorySelector(props) {
   const [remember, setRemember] = createSignal(true);
   const [mode, setMode] = createSignal('permit');
   const [validated, setValidated] = createSignal(null);
-  let element, trigger, dialog;
-  let stopped = false, attempt = 0, backdropStart = false, tokensEdited = false;
+  const [targetRepository, setTargetRepository] = createSignal(null);
+  const [forgetTarget, setForgetTarget] = createSignal(null);
+  const [forgetError, setForgetError] = createSignal('');
+  let element, trigger, dialog, forgetDialog;
+  let stopped = false, attempt = 0, tokensEdited = false;
   const closeMenu = () => { if (!dialog?.open) { attempt++; setBusy(false); setOpen(false); setError(''); } };
   const outside = (event) => { if (!element?.contains(event.target)) closeMenu(); };
   const escape = (event) => { if (event.key === 'Escape' && open() && !dialog?.open) { closeMenu(); trigger?.focus(); } };
@@ -22,13 +25,14 @@ export default function RepositorySelector(props) {
   document.addEventListener('keydown', escape);
   onCleanup(() => { stopped = true; attempt++; document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); });
 
-  function openPermit(repository = props.repository, connecting = false) {
+  function openPermit(repository = props.repository, connecting = false, connectedName = '') {
     if (props.switchDisabled) return;
     attempt++; setOpen(false); setBusy(false); setError(''); setValidated(null); tokensEdited = false;
-    const saved = props.getCredentials(repository);
-    setAddress(connecting ? '' : repositoryName(repository));
-    setToken(saved?.token || (connecting ? props.credentials?.token : '') || '');
-    setProjectToken(saved?.projectToken || (connecting ? props.credentials?.projectToken : '') || '');
+    setTargetRepository(repository);
+    const saved = repository ? props.getCredentials(repository) : null;
+    setAddress(connecting ? connectedName : (repository ? repositoryName(repository) : ''));
+    setToken(saved?.token || (connecting && !repository ? props.credentials?.token : '') || '');
+    setProjectToken(saved?.projectToken || (props.projectsEnabled && connecting && !repository ? props.credentials?.projectToken : '') || '');
     setRemember(saved?.remember ?? true);
     setMode(connecting ? 'connect' : 'permit');
     dialog.showModal();
@@ -56,7 +60,7 @@ export default function RepositorySelector(props) {
       const api = createGitHubClient({ ...repository, ...credentials });
       const canonical = await api.checkRepository();
       if (stopped || version !== attempt) return;
-      if (credentials.projectToken) {
+      if (props.projectsEnabled && credentials.projectToken) {
         try { await createGitHubClient({ ...canonical, ...credentials }).listProjects(); }
         catch (failure) {
           if (!stopped && version === attempt) {
@@ -83,12 +87,37 @@ export default function RepositorySelector(props) {
   }
   function forget() {
     if (busy() || props.switchDisabled) return;
-    try { props.onForget(); }
+    const target = currentTarget();
+    if (!target) return;
+    try {
+      props.onForget(target);
+      tokensEdited = true;
+      setToken(''); setProjectToken(''); setValidated(null);
+    }
     catch (failure) { setError(failure.message); }
   }
-  function outsideDialog(event) {
-    const bounds = dialog.getBoundingClientRect();
-    return event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom);
+  function requestForgetRepository() {
+    if (busy() || props.switchDisabled) return;
+    const target = currentTarget();
+    if (!canForgetRepository(target, props.defaultRepository)) return;
+    setForgetTarget(target); setForgetError('');
+    forgetDialog.showModal();
+  }
+  function forgetRepository() {
+    if (busy() || props.switchDisabled) return;
+    const target = forgetTarget();
+    if (!canForgetRepository(target, props.defaultRepository)) return;
+    try {
+      props.onForgetRepository(target);
+      if (forgetDialog.open) forgetDialog.close();
+      if (dialog.open) dialog.close();
+    } catch (failure) { setForgetError(failure.message); }
+  }
+  function currentTarget() {
+    const target = targetRepository();
+    if (!target) return null;
+    try { return repositoryKey(parseRepository(address())) === repositoryKey(target) ? target : null; }
+    catch { return null; }
   }
   function changed() { setValidated(null); setError(''); }
   function restoreSavedCredentials() {
@@ -100,26 +129,33 @@ export default function RepositorySelector(props) {
   }
 
   return <header ref={element} class="workspace-header repository-header">
-    <button ref={trigger} type="button" class="repository-trigger" title={repositoryName(props.repository)} aria-label={`Repository ${repositoryName(props.repository)}`} aria-expanded={open()} aria-controls="repository-menu"
+    <button ref={trigger} type="button" class="repository-trigger" title={props.repository ? repositoryName(props.repository) : 'Connect repository'} aria-label={props.repository ? `Repository ${repositoryName(props.repository)}` : 'Connect repository'} aria-expanded={open()} aria-controls="repository-menu"
       onClick={() => { if (open()) closeMenu(); else setOpen(true); }}>
       <img class="workspace-icon" src="./lyra.jpg" alt="" />
-      <span class="repository-heading"><span class="repository-title">{props.repository.repo || 'Connect repository'}</span><span class="muted">{props.repository.owner || 'Blackboard'}</span></span>
+      <span class="repository-heading"><span class="repository-title">{props.repository?.repo || 'Blackboard'}</span><span class="muted">{props.repository?.owner || 'No repository'}</span></span>
       <svg class="repository-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
     </button>
     <Show when={open()}><div id="repository-menu" class="repository-menu" aria-label="Repository selection" aria-busy={busy()}>
-      <div class="repository-current">
+      <Show when={props.repository}><div class="repository-current">
         <span title={repositoryName(props.repository)}>{repositoryName(props.repository)}</span>
         <button type="button" class="repository-permit" disabled={busy() || props.switchDisabled} aria-haspopup="dialog" onClick={() => openPermit()}>{props.permitted ? 'Permitted' : 'Permit'}</button>
-      </div>
-      <button type="button" class="repository-connect" disabled={busy() || props.switchDisabled} aria-haspopup="dialog" onClick={() => openPermit(props.repository, true)}>Connect repository</button>
+      </div></Show>
+      <Show when={props.recentRepositories?.length}>
+        <div class="repository-recents" role="group" aria-label="Recent repositories">
+          <For each={props.recentRepositories}>{(repository) =>
+            <button type="button" disabled={busy() || props.switchDisabled} onClick={() => openPermit(repository, true, repositoryName(repository))}>
+              {repositoryName(repository)}
+            </button>
+          }</For>
+        </div>
+      </Show>
+      <button type="button" class="repository-connect" disabled={busy() || props.switchDisabled} aria-haspopup="dialog" onClick={() => openPermit(null, true)}>Connect repository</button>
       <Show when={busy()}><p class="muted">Connecting...</p></Show>
       <Show when={props.switchDisabled}><p class="muted">Waiting for the current change to finish.</p></Show>
       <Show when={error()}><p class="dialog-error" role="alert">{error()}</p></Show>
     </div></Show>
     <dialog ref={dialog} class="topic-status-dialog permit-dialog" aria-labelledby="permit-title"
-      onPointerDown={(event) => { backdropStart = outsideDialog(event); }}
-      onClick={(event) => { if (backdropStart && outsideDialog(event)) dialog.close(); backdropStart = false; }}
-      onClose={() => { attempt++; setBusy(false); setToken(''); setProjectToken(''); setValidated(null); setError(''); trigger?.focus(); }}>
+      onClose={() => { attempt++; setBusy(false); setToken(''); setProjectToken(''); setValidated(null); setTargetRepository(null); setError(''); trigger?.focus(); }}>
       <form onSubmit={permit} aria-busy={busy()}>
         <h2 id="permit-title">{mode() === 'connect' ? 'Connect repository' : 'Permit repository'}</h2>
         <label for="permit-repository">Repository</label>
@@ -128,17 +164,34 @@ export default function RepositorySelector(props) {
         <label for="permit-token">Repository token</label>
         <input id="permit-token" type="password" required autocomplete="off" spellcheck="false" value={token()} disabled={busy()}
           onInput={(event) => { tokensEdited = true; setToken(event.currentTarget.value); changed(); }} />
-        <label for="permit-project-token">Projects token <span class="muted">(optional)</span></label>
+        <Show when={props.projectsEnabled}><label for="permit-project-token">Projects token <span class="muted">(optional)</span></label>
         <input id="permit-project-token" type="password" autocomplete="off" spellcheck="false" value={projectToken()} disabled={busy()}
-          onInput={(event) => { tokensEdited = true; setProjectToken(event.currentTarget.value); changed(); }} />
+          onInput={(event) => { tokensEdited = true; setProjectToken(event.currentTarget.value); changed(); }} /></Show>
         <label class="permit-remember"><input type="checkbox" checked={remember()} disabled={busy()} onChange={(event) => setRemember(event.currentTarget.checked)} /> Remember on this browser</label>
         <Show when={error()}><p class="dialog-error" role="alert">{error()}</p></Show>
-        <Show when={mode() === 'permit' && props.credentials?.token}><button type="button" class="permit-forget" disabled={busy() || props.switchDisabled} onClick={forget}>Forget credentials</button></Show>
+        <Show when={currentTarget()}>{(target) => <div class="permit-forget-actions">
+          <button type="button" class="permit-forget" disabled={busy() || props.switchDisabled}
+            aria-label={`Forget credentials for ${repositoryName(target())}`} onClick={forget}>Forget credentials</button>
+          <Show when={canForgetRepository(target(), props.defaultRepository)}>
+            <button type="button" class="permit-forget" disabled={busy() || props.switchDisabled}
+              aria-label={`Forget repository ${repositoryName(target())}`} aria-haspopup="dialog" onClick={requestForgetRepository}>Forget repository</button>
+          </Show>
+        </div>}</Show>
         <div class="dialog-actions"><button type="button" class="dialog-cancel" onClick={() => dialog.close()}>Cancel</button>
           <Show when={validated()}><button type="button" disabled={busy() || props.switchDisabled} onClick={withoutProjects}>Continue without Projects</button></Show>
           <button type="submit" disabled={busy() || props.switchDisabled || !token().trim() || !address().trim()}>{busy() ? 'Checking...' : 'Connect'}</button>
         </div>
       </form>
+    </dialog>
+    <dialog ref={forgetDialog} class="topic-status-dialog forget-repository-dialog" aria-labelledby="forget-repository-title"
+      onClick={(event) => { if (event.target === forgetDialog) forgetDialog.close(); }}
+      onClose={() => { setForgetTarget(null); setForgetError(''); }}>
+      <h2 id="forget-repository-title">Forget {forgetTarget() ? repositoryName(forgetTarget()) : 'repository'} and its credentials?</h2>
+      <Show when={forgetError()}><p class="dialog-error" role="alert">{forgetError()}</p></Show>
+      <div class="dialog-actions">
+        <button type="button" onClick={forgetRepository}>Forget</button>
+        <button type="button" class="dialog-cancel" onClick={() => forgetDialog.close()}>Cancel</button>
+      </div>
     </dialog>
   </header>;
 }

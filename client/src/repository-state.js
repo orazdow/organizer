@@ -15,6 +15,42 @@ export function parseRepository(value) {
 export const repositoryName = ({ owner, repo }) => `${owner}/${repo}`;
 export const repositoryKey = (repository) => repositoryName(repository).toLowerCase();
 
+export const RECENT_REPOSITORY_LIMIT = 4;
+
+export function normalizeRecentRepositories(value, activeRepository = null) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set(activeRepository ? [repositoryKey(activeRepository)] : []);
+  const repositories = [];
+  for (const entry of value) {
+    try {
+      const repository = entry && typeof entry === 'object'
+        ? parseRepository(`${entry.owner}/${entry.repo}`)
+        : parseRepository(entry);
+      const key = repositoryKey(repository);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      repositories.push(repository);
+      if (repositories.length === RECENT_REPOSITORY_LIMIT) break;
+    } catch { /* Ignore invalid saved names. */ }
+  }
+  return repositories;
+}
+
+export function recentRepositoriesAfterConnect(recent, previous, next) {
+  const history = previous && repositoryKey(previous) !== repositoryKey(next)
+    ? [previous, ...recent]
+    : recent;
+  return normalizeRecentRepositories(history, next);
+}
+
+export function recentRepositoriesAfterForget(recent, forgotten) {
+  return recent.filter((repository) => repositoryKey(repository) !== repositoryKey(forgotten));
+}
+
+export function canForgetRepository(repository, defaultRepository) {
+  return Boolean(repository) && (!defaultRepository || repositoryKey(repository) !== repositoryKey(defaultRepository));
+}
+
 // A template ships the same prebuilt client to every owner. Standard Pages URLs
 // identify the new home repository without requiring a rebuild or private config.
 export function repositoryFromPagesUrl(value) {
@@ -26,4 +62,11 @@ export function repositoryFromPagesUrl(value) {
     const repo = first && first !== 'index.html' ? decodeURIComponent(first) : `${owner}.github.io`;
     return repositoryName(parseRepository(`${owner}/${repo}`));
   } catch { return null; }
+}
+
+export function defaultRepositoryForUrl(value, configured = '') {
+  if (configured) return configured;
+  const pagesRepository = repositoryFromPagesUrl(value);
+  if (pagesRepository?.toLowerCase() === 'orazdow/blackboard') return null;
+  return pagesRepository || 'orazdow/Blackboard';
 }
